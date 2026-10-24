@@ -1,0 +1,111 @@
+name: Deploy Node App To Ubuntu
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+jobs:
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout Main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Check Node Version
+        run: |
+          node -v
+          npm -v
+
+      - name: Install Dependencies And Run Tests
+        run: |
+          npm ci
+          npm test
+
+      - name: Stop Old Application
+        run: |
+          APP_DIR="/home/node-demo/githubActionNodeDemo"
+          PID_FILE="$APP_DIR/app.pid"
+
+          if [ -f "$PID_FILE" ]; then
+            PID=$(cat "$PID_FILE")
+
+            if [[ "$PID" =~ ^[0-9]+$ ]] &&
+               [ "$PID" -gt 1 ] &&
+               [ -r "/proc/$PID/cmdline" ]; then
+
+              CMD=$(tr '\0' ' ' < "/proc/$PID/cmdline")
+
+              if [[ "$CMD" == *"src/server.js"* ]] &&
+                 [[ "$CMD" == *"--port=8082"* ]]; then
+                kill "$PID"
+
+                for i in {1..10}; do
+                  if ! kill -0 "$PID" 2>/dev/null; then
+                    break
+                  fi
+                  sleep 1
+                done
+
+                if kill -0 "$PID" 2>/dev/null; then
+                  echo "ERROR: Old application did not stop"
+                  exit 1
+                fi
+              else
+                echo "PID file does not identify our port 8082 application."
+              fi
+            fi
+
+            rm -f "$PID_FILE"
+          fi
+
+      - name: Copy New Application
+        run: |
+          APP_DIR="/home/node-demo/githubActionNodeDemo"
+
+          mkdir -p "$APP_DIR"
+          rm -rf "$APP_DIR/src" "$APP_DIR/node_modules"
+
+          cp -r src "$APP_DIR/src"
+          cp package.json package-lock.json "$APP_DIR/"
+
+          cd "$APP_DIR"
+          npm ci --omit=dev
+
+      - name: Start Application
+        run: |
+          cd /home/node-demo/githubActionNodeDemo
+
+          RUNNER_TRACKING_ID="" nohup node src/server.js --port=8082 > app.log 2>&1 &
+
+          echo $! > app.pid
+
+      - name: Verify Deployment
+        run: |
+          APP_DIR="/home/node-demo/githubActionNodeDemo"
+
+          for i in {1..30}; do
+            if curl --fail --silent http://localhost:8082/hello; then
+              echo ""
+              echo "Deployment successful!"
+              exit 0
+            fi
+
+            sleep 1
+          done
+
+          echo "ERROR: Application failed to start"
+          cat "$APP_DIR/app.log"
+          exit 1
